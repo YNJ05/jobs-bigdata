@@ -1,0 +1,121 @@
+# Job offers classification: Kafka -> Spark Structured Streaming -> (MLlib) -> Elasticsearch/Kibana
+#
+#   docker compose --profile level1 up -d --build    # keywords, console output
+#   docker compose --profile level2 up -d --build    # MLlib, console output
+#   docker compose --profile level3 up -d --build    # MLlib + Elasticsearch + Kibana
+
+x-app: &app
+  build: .
+  image: jobs-bigdata-app:latest
+  volumes:
+    - ./src:/app/src
+    - ./data:/app/data:ro
+    - models:/models
+    - ivy:/ivy
+
+services:
+  # ---------------------------------------------------------------- Kafka (KRaft, no ZooKeeper)
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka: {condition: service_healthy}
+    command: ["/opt/kafka/bin/kafka-topics.sh", "--create", "--if-not-exists",
+              "--topic", "job-offers", "--partitions", "1", "--replication-factor", "1",
+              "--bootstrap-server", "kafka:9092"]
+    restart: "no"
+
+  # ---------------------------------------------------------------- Producer
+  producer:
+    <<: *app
+    profiles: [level1, level2, level3]
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+    command: ["python", "src/producer.py", "--delay", "0.1"]
+    restart: "no"
+
+  # ---------------------------------------------------------------- Level 1
+  level1:
+    <<: *app
+    profiles: [level1]
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+    command: spark-submit --master local[2] --driver-memory 1g --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/ivy /app/src/level1_keywords.py
+
+  # ---------------------------------------------------------------- Level 2 / 3: model training (batch)
+  trainer:
+    <<: *app
+    profiles: [level2, level3]
+    command: spark-submit --master local[2] --driver-memory 1g /app/src/train_model.py
+    restart: "no"
+
+  level2:
+    <<: *app
+    profiles: [level2]
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+      trainer: {condition: service_completed_successfully}
+    command: spark-submit --master local[2] --driver-memory 1g --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/ivy /app/src/level2_mllib.py
+
+  # ---------------------------------------------------------------- Level 3
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    profiles: [level3]
+    container_name: elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    volumes: [esdata:/usr/share/elasticsearch/data]
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    profiles: [level3]
+    container_name: kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports: ["5601:5601"]
+    depends_on: [elasticsearch]
+
+  kibana-setup:
+    <<: *app
+    profiles: [level3]
+    depends_on: [elasticsearch, kibana]
+    command: ["python", "src/setup_kibana.py"]
+    restart: "no"
+
+  level3:
+    <<: *app
+    profiles: [level3]
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+      trainer: {condition: service_completed_successfully}
+      elasticsearch: {condition: service_started}
+    command: spark-submit --master local[2] --driver-memory 1g --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/ivy /app/src/level3_elasticsearch.py
+
+volumes:
+  models:
+  ivy:
+  esdata:

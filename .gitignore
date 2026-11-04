@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Java / Spark
+*.class
+*.jar
+*.log
+metastore_db/
+derby.log
+spark-warehouse/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (local only)
+models/
+ivy/
+esdata/
+
+# Checkpoints (generated at runtime)
+chk-*/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Misc
+*.bak
+*.tmp
